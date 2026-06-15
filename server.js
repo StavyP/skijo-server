@@ -233,18 +233,55 @@ io.on('connection', socket => {
   });
 
   // ── START ──
-  socket.on('start-game', () => {
-    try {
-      const room = getRoom(socket);
-      if (!room || room.host !== socket.id) return;
-      if (room.players.length < 2) return socket.emit('err', 'Il faut au moins 2 joueurs.');
+// Trouve l'événement déclenché lorsque le créateur clique sur "Démarrer la partie"
+socket.on('start-game', () => {
+  const code = socket.data?.room;
+  const room = rooms[code];
+  if (!room || room.host !== socket.id || room.started) return;
 
-      room.game    = buildGame(room.players);
-      room.started = true;
-      io.to(room.code).emit('game-start');
-      broadcastGame(room);
-    } catch(e) { console.error('start-game error', e.message); }
+  // 1. ORDRE ALÉATOIRE : Mélange complet des participants
+  room.players = shuffle(room.players);
+
+  // 2. Initialisation du jeu standard Skyjo
+  room.started = true;
+  room.game = createGame(room.players.length);
+
+  // 3. MISE EN PLACE DES DEUX CARTES RETOURNÉES : 
+  // Dans Skyjo, chaque joueur doit d'abord retourner 2 cartes pour définir qui commence.
+  // Détectons dynamiquement le joueur ayant le plus fort score après cette phase d'initialisation :
+  
+  // Appelée une fois que les joueurs ont validé leur phase d'initialisation :
+  // (À glisser à l'endroit où ton serveur passe de la phase "init" au premier tour réel)
+  determineFirstPlayer(room);
+
+  broadcastGame(room);
+});
+
+function determineFirstPlayer(room) {
+  let highestValue = -999;
+  let startingIndex = 0;
+
+  room.players.forEach((player, index) => {
+    // Calcul de la somme des valeurs des cartes visibles du joueur
+    const pGrid = room.game.grids[index];
+    let playerInitScore = 0;
+    
+    // On somme uniquement les cartes retournées (visibles)
+    pGrid.forEach(card => {
+      if (card.visible) {
+        playerInitScore += card.value;
+      }
+    });
+
+    if (playerInitScore > highestValue) {
+      highestValue = playerInitScore;
+      startingIndex = index;
+    }
   });
+
+  // Assigne le premier tour au joueur possédant le plus de points
+  room.game.turnIndex = startingIndex;
+}
 
   // ── ACTIONS ──
   socket.on('action', ({ type, ci }) => {
