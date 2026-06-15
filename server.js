@@ -232,30 +232,29 @@ io.on('connection', socket => {
     } catch(e) { console.error('join-room error', e.message); }
   });
 
-  // ── START ──
-// Trouve l'événement déclenché lorsque le créateur clique sur "Démarrer la partie"
-socket.on('start-game', () => {
-  const code = socket.data?.room;
-  const room = rooms[code];
-  if (!room || room.host !== socket.id || room.started) return;
+// ── START ──
+  socket.on('start-game', () => {
+    try {
+      const code = socket.data?.room;
+      const room = rooms[code];
+      if (!room || room.host !== socket.id || room.started) return;
 
-  // 1. ORDRE ALÉATOIRE : Mélange complet des participants
-  room.players = shuffle(room.players);
+      // 1. ORDRE ALÉATOIRE : Mélange complet des participants
+      room.players = shuffle(room.players);
 
-  // 2. Initialisation du jeu standard Skyjo
-  room.started = true;
-  room.game = createGame(room.players.length);
+      // 2. Initialisation du jeu avec votre vraie fonction buildGame
+      room.started = true;
+      room.game = buildGame(room.players);
 
-  // 3. MISE EN PLACE DES DEUX CARTES RETOURNÉES : 
-  // Dans Skyjo, chaque joueur doit d'abord retourner 2 cartes pour définir qui commence.
-  // Détectons dynamiquement le joueur ayant le plus fort score après cette phase d'initialisation :
-  
-  // Appelée une fois que les joueurs ont validé leur phase d'initialisation :
-  // (À glisser à l'endroit où ton serveur passe de la phase "init" au premier tour réel)
-  determineFirstPlayer(room);
+      // 3. On envoie le signal de transition d'écran au client (index.html / script.js)
+      io.to(code).emit('game-start');
 
-  broadcastGame(room);
-});
+      // 4. On partage l'état initial du jeu
+      broadcastGame(room);
+    } catch (e) {
+      console.error('start-game error', e.message);
+    }
+  });
 
 function determineFirstPlayer(room) {
   let highestValue = -999;
