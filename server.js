@@ -2,8 +2,6 @@ const express = require('express');
 const http    = require('http');
 const { Server } = require('socket.io');
 const cors    = require('cors');
-const fs      = require('fs');
-const path    = require('path');
 
 const app    = express();
 const server = http.createServer(app);
@@ -15,45 +13,12 @@ app.use(cors());
 app.get('/', (_req, res) => res.send('Skyjo Server OK'));
 
 // ─────────────────────────────────────────────
-// SKINS — liste les sous-dossiers de ./image/
-// Chaque skin est un sous-dossier contenant back.png + -2.png … 12.png
-// La réponse est un tableau de noms de skin (strings).
-// ─────────────────────────────────────────────
-app.get('/api/skins', (_req, res) => {
-  try {
-    const imgDir = path.join(__dirname, 'image');
-    if (!fs.existsSync(imgDir)) return res.json([]);
-
-    const entries = fs.readdirSync(imgDir, { withFileTypes: true });
-    // On liste uniquement les sous-dossiers (chaque dossier = un skin)
-    const skins = entries
-      .filter(e => e.isDirectory())
-      .map(e => e.name)
-      .sort();
-
-    res.json(skins);
-  } catch (e) {
-    console.error('/api/skins error', e.message);
-    res.json([]);
-  }
-});
-
-// ─────────────────────────────────────────────
 // ROOMS
 // ─────────────────────────────────────────────
 const rooms = {};
 
 function makeCode() {
   return Math.random().toString(36).slice(2, 7).toUpperCase();
-}
-
-function sanitizeName(name) {
-  if (typeof name !== 'string') return '';
-  const trimmed = name
-    .replace(/[<>&"'`]/g, '') // évite l'injection HTML si jamais le client oublie d'échapper
-    .trim()
-    .slice(0, 16);
-  return trimmed;
 }
 
 // ─────────────────────────────────────────────
@@ -139,19 +104,15 @@ function nextTurn(g) {
 }
 
 function endRound(g) {
-  g.players.forEach(p => {
-    p.grid.forEach(c => { if (!c.gone) c.up = true; });
-    checkCols(p); // une colonne peut se révéler identique seulement au décompte final
-  });
-  const scores = g.players.map(sum);
-  const trig   = g.triggerBy;
-  const others = scores.filter((_, i) => i !== trig);
-  const lowestOther = others.length ? Math.min(...others) : -Infinity;
-  g.penaltyOn = null;
+  g.players.forEach(p => p.grid.forEach(c => { if (!c.gone) c.up = true; }));
+  const scores      = g.players.map(sum);
+  const trig        = g.triggerBy;
+  const lowestOther = Math.min(...scores.filter((_, i) => i !== trig));
+  g.penaltyOn       = null;
 
   g.players.forEach((p, i) => {
     let s = scores[i];
-    if (i === trig && s > lowestOther && s > 0) { s *= 2; g.penaltyOn = i; }
+    if (i === trig && s > lowestOther) { s *= 2; g.penaltyOn = i; }
     p.roundScore = s;
     p.total     += s;
   });
@@ -162,8 +123,7 @@ function endRound(g) {
   if (g.players.some(p => p.total >= 100)) {
     g.gameOver = true;
     const min  = Math.min(...g.players.map(p => p.total));
-    const winners = g.players.filter(p => p.total === min);
-    g.winner  = winners.map(p => p.name).join(' & ');
+    g.winner   = g.players.find(p => p.total === min).name;
   }
 }
 
@@ -241,14 +201,11 @@ io.on('connection', socket => {
   // ── CREATE ──
   socket.on('create-room', ({ name }) => {
     try {
-      const cleanName = sanitizeName(name);
-      if (!cleanName) return socket.emit('err', 'Pseudo invalide.');
-
       const code = makeCode();
       rooms[code] = {
         code,
         host:    socket.id,
-        players: [{ id: socket.id, name: cleanName, total: 0 }],
+        players: [{ id: socket.id, name, total: 0 }],
         game:    null,
         started: false,
       };
@@ -262,19 +219,16 @@ io.on('connection', socket => {
   // ── JOIN ──
   socket.on('join-room', ({ name, code }) => {
     try {
-      const cleanName = sanitizeName(name);
-      if (!cleanName) return socket.emit('err', 'Pseudo invalide.');
-
-      const room = rooms[(code || '').toUpperCase()];
+      const room = rooms[code];
       if (!room)                    return socket.emit('err', 'Salle introuvable.');
       if (room.started)             return socket.emit('err', 'La partie a déjà commencé.');
       if (room.players.length >= 8) return socket.emit('err', 'Salle pleine (8 max).');
 
-      room.players.push({ id: socket.id, name: cleanName, total: 0 });
-      socket.join(room.code);
-      socket.data.room = room.code;
-      socket.emit('room-joined', { code: room.code, playerId: socket.id });
-      io.to(room.code).emit('room-update', publicRoom(room));
+      room.players.push({ id: socket.id, name, total: 0 });
+      socket.join(code);
+      socket.data.room = code;
+      socket.emit('room-joined', { code, playerId: socket.id });
+      io.to(code).emit('room-update', publicRoom(room));
     } catch(e) { console.error('join-room error', e.message); }
   });
 
@@ -284,7 +238,6 @@ io.on('connection', socket => {
       const code = socket.data?.room;
       const room = rooms[code];
       if (!room || room.host !== socket.id || room.started) return;
-      if (room.players.length < 2) return socket.emit('err', 'Il faut au moins 2 joueurs.');
 
       // 1. ORDRE ALÉATOIRE : Mélange complet des participants
       room.players = shuffle(room.players);
@@ -303,9 +256,31 @@ io.on('connection', socket => {
     }
   });
 
-// La sélection du premier joueur (somme la plus haute des 2 cartes
-// révélées en phase d'init) est gérée directement dans le handler
-// 'init-flip' ci-dessous, conformément à la règle officielle du Skyjo.
+function determineFirstPlayer(room) {
+  let highestValue = -999;
+  let startingIndex = 0;
+
+  room.players.forEach((player, index) => {
+    // Calcul de la somme des valeurs des cartes visibles du joueur
+    const pGrid = room.game.grids[index];
+    let playerInitScore = 0;
+    
+    // On somme uniquement les cartes retournées (visibles)
+    pGrid.forEach(card => {
+      if (card.visible) {
+        playerInitScore += card.value;
+      }
+    });
+
+    if (playerInitScore > highestValue) {
+      highestValue = playerInitScore;
+      startingIndex = index;
+    }
+  });
+
+  // Assigne le premier tour au joueur possédant le plus de points
+  room.game.turnIndex = startingIndex;
+}
 
   // ── ACTIONS ──
   socket.on('action', ({ type, ci }) => {
@@ -421,23 +396,8 @@ io.on('connection', socket => {
       if (!room) return;
       const name = room.players.find(p => p.id === socket.id)?.name || '?';
       room.players = room.players.filter(p => p.id !== socket.id);
-
       if (room.players.length === 0) { delete rooms[code]; return; }
       if (room.host === socket.id) room.host = room.players[0].id;
-
-      // Si une partie est en cours, on ne retire pas le joueur de la grille
-      // (ça casserait les calculs de score) mais on s'assure que le jeu
-      // n'est jamais bloqué en attente du tour d'un joueur parti.
-      if (room.game && !room.game.gameOver) {
-        const g = room.game;
-        const wasCurrent = g.players[g.cur]?.id === socket.id;
-        if (wasCurrent && g.phase !== 'init' && g.phase !== 'scoring') {
-          g.held = null;
-          nextTurn(g);
-        }
-        broadcastGame(room);
-      }
-
       io.to(code).emit('player-left', { name });
       io.to(code).emit('room-update', publicRoom(room));
       console.log(`- ${name} left ${code}`);
